@@ -1,0 +1,33 @@
+version: "3.9"
+
+services:
+  logging-service:
+    build: ./logging-service
+    container_name: logging-service
+    ports:
+      - "8001:8001"
+    networks:
+      - microservices-net
+
+  counter-service:
+    build: ./counter-service
+    container_name: counter-service
+    ports:
+      - "8002:8002"
+    networks:
+      - microservices-net
+
+  facade-service:
+    build: ./facade-service
+    container_name: facade-service
+    ports:
+      - "8000:8000"
+    depends_on:
+      - logging-service
+      - counter-service
+    networks:
+      - microservices-net
+
+networks:
+  microservices-net:
+    driver: bridge
