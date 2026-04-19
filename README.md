@@ -1,134 +1,150 @@
-# Microservices Basics — Banking System
+# Microservices with Message Queue — Banking System
 
-Three FastAPI microservices implementing a basic banking transaction system. Each service runs in its own Docker container managed via Docker Compose.
+FastAPI microservices implementing a banking transaction system with a **Hazelcast** distributed message queue and a **config-server** service registry.
 
-- `facade-service` (port 8000)
-- `logging-service` (port 8001)
-- `counter-service` (port 8002)
+## Services
 
-## Running with Docker Compose
+| Service | Internal port | Host port(s) |
+|---|---|---|
+| `facade-service` | 8000 | 8000 |
+| `logging-service` ×3 | 8001 | 8011, 8012, 8013 |
+| `counter-service` | 8002 | 8002 |
+| `config-server` | 8080 | 8080 |
+| `hazelcast-1/2/3` | 5701 | 5701, 5702, 5703 |
+
+## Architecture
+
+```
+Client
+  │
+  ▼ HTTP POST/GET
+Facade-service ──── config-server (service registry)
+  │  │
+  │  │ HTTP POST (log)           ┌─────────────┐
+  │  └──────────────────────────►│ logging-svc │×3
+  │                              └──────┬──────┘
+  │ Hazelcast Queue (MQ)                │ shared
+  └──────────────────────────────►  HZ cluster (3 nodes)
+                                        │
+                                  counter-service
+                                  (consumes from queue)
+```
+
+### Config Server (port 8080)
+Each microservice registers its URL on startup via `POST /register`. Before calling a downstream service, the facade queries `GET /services/{name}` and picks a URL at random.
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/register` | Register `{service_name, url}` |
+| `GET` | `/services/{service_name}` | List all URLs for a service |
+| `GET` | `/registry` | Dump the full registry |
+
+### Facade Service (port 8000)
+Single entry point for all client requests.
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/transactions` | Log transaction + enqueue to counter-service MQ |
+| `GET` | `/user/{user_id}` | Balance + transaction history |
+| `GET` | `/accounts` | All account balances |
+| `GET` | `/stats` | Accumulated call times to downstream services |
+| `POST` | `/stats/reset` | Reset timing accumulators |
+
+On `POST /transactions` the facade:
+1. Picks a random `logging-service` URL from config-server and calls `POST /log` (synchronous).
+2. Puts the transaction JSON into the Hazelcast `counter-transactions` queue (fire-and-forget — does **not** wait for counter-service).
+
+### Logging Service (ports 8011–8013, 3 instances)
+Stores transactions in a **Hazelcast distributed map** (`logging-messages`) shared across all instances.
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/log` | Store `{transaction_id, user_id, amount}` (deduplication by `transaction_id`) |
+| `GET` | `/messages` | All stored transactions |
+| `GET` | `/user/{user_id}` | Transactions for one user |
+
+### Counter Service (port 8002)
+Runs a background thread that **consumes** from the Hazelcast `counter-transactions` queue and updates in-memory balances.
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/balance/{user_id}` | Balance for one user |
+| `GET` | `/balances` | All account balances |
+
+### Hazelcast Cluster (3 nodes, ports 5701–5703)
+Provides both the **distributed map** (used by logging-service) and the **distributed queue** (used as MQ between facade and counter).
+
+## Running
 
 ```bash
 docker compose up --build
 ```
 
-To stop:
+To stop and clean up:
 
 ```bash
 docker compose down
 ```
 
-## Architecture
-
-### Facade Service (port 8000)
-Gateway that handles all client requests and fans out to downstream services.
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/transactions` | Submit a transaction `{user_id, amount}` |
-| `GET`  | `/user/{user_id}` | Get balance + transaction history for a user |
-| `GET`  | `/accounts` | Get balances for all accounts |
-| `GET`  | `/stats` | Accumulated call time to logging/counter services |
-| `POST` | `/stats/reset` | Reset timing accumulators |
-
-On `POST /transactions` the facade generates a `transaction_id`, then forwards the full transaction to logging-service and counter-service **concurrently**, and returns `{transaction_id, balance}`.
-
-### Logging Service (port 8001)
-Stores all transactions in memory using `transaction_id` as key (deduplication built-in).
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/log` | Store `{transaction_id, user_id, amount}` |
-| `GET`  | `/messages` | Return all stored transactions |
-| `GET`  | `/user/{user_id}` | Return transactions for one user |
-
-### Counter Service (port 8002)
-Maintains per-user account balances in memory (`user_id → balance`).
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/transaction` | Apply credit/debit, return updated balance |
-| `GET`  | `/balance/{user_id}` | Get balance for one user |
-| `GET`  | `/balances` | Get all account balances |
-
 ## Example Usage
 
-**Submit transactions:**
+**Submit 10 transactions:**
 ```bash
-curl -X POST http://localhost:8000/transactions \
-  -H 'Content-Type: application/json' \
-  -d '{"user_id": "alice", "amount": 100.0}'
-
-curl -X POST http://localhost:8000/transactions \
-  -H 'Content-Type: application/json' \
-  -d '{"user_id": "alice", "amount": -30.0}'
-
-curl -X POST http://localhost:8000/transactions \
-  -H 'Content-Type: application/json' \
-  -d '{"user_id": "bob", "amount": 50.0}'
+for i in $(seq 1 10); do
+  curl -s -X POST http://localhost:8000/transactions \
+    -H 'Content-Type: application/json' \
+    -d "{\"user_id\": \"alice\", \"amount\": 10.0}" | python3 -m json.tool
+done
 ```
 
-**Check results:**
+**Read results:**
 ```bash
 # alice's balance + full transaction history
 curl http://localhost:8000/user/alice
 
 # all account balances
 curl http://localhost:8000/accounts
-
-# timing stats for downstream services
-curl http://localhost:8000/stats
 ```
 
-![res1](assests/basic_example/image1.png)
-![res2](assests/basic_example/image2.png)
-![res3](assests/basic_example/image3.png)
-![res4](assests/basic_example/image4.png)
-
-## Performance Testing
-
-`perf/bench.py` runs concurrent clients against the facade and measures throughput and latency. After the run it fetches `/accounts` to verify correctness and `/stats` for downstream timing breakdown.
-
-**Scenario 1** — 10 clients each posting 10K transactions to their own account (expected: 10 accounts × balance 10 000):
+**Check which logging-service instances handled requests** (visible in container logs):
 ```bash
-python perf/bench.py --scenario 1 --clients 10 --per-client 10000
+docker logs logging-service-1
+docker logs logging-service-2
+docker logs logging-service-3
 ```
 
-**Scenario 2** — 10 clients each posting 10K transactions to one shared account (expected: 1 account with balance 100 000):
+## Fault-Tolerance Demo
+
+**Pause counter-service — POSTs still succeed, messages queue up:**
 ```bash
-python perf/bench.py --scenario 2 --clients 10 --per-client 10000
+docker pause counter-service
+
+# These go through fine (logged, queued in HZ)
+curl -X POST http://localhost:8000/transactions -H 'Content-Type: application/json' \
+  -d '{"user_id": "alice", "amount": 5.0}'
+
+# GET returns null balance (counter-service unavailable)
+curl http://localhost:8000/user/alice
 ```
 
-**Custom load:**
+**Unpause — counter-service drains the queue and catches up:**
 ```bash
-python perf/bench.py \
-  --url http://localhost:8000/transactions \
-  --data '{"user_id":"alice","amount":1.0}' \
-  --clients 5 --per-client 200
+docker unpause counter-service
+# After a few seconds:
+curl http://localhost:8000/user/alice   # balance now reflects all queued transactions
 ```
-
-Metrics reported: total requests, successful responses, wall time, RPS, avg/median/min/max latency, and per-service call counts and average times from `/stats`.
-
-High load:
-![res1](assests/productivity_tests/test_one/img1.png)
-![res2](assests/productivity_tests/test_one/img2.png)
-![res3](assests/productivity_tests/test_one/img3.png)
-
-Scenario 1:
-![res1](assests/productivity_tests/test_two/img1.png)
-![res2](assests/productivity_tests/test_two/img2.png)
-![res3](assests/productivity_tests/test_two/img3.png)
-
-Scenario 2:
-![res1](assests/productivity_tests/test_three/img1.png)
-![res2](assests/productivity_tests/test_three/img2.png)
-![res3](assests/productivity_tests/test_three/img3.png)
 
 ## Project Structure
 
 ```
 micro_services_architevture/
 ├── docker-compose.yml
+├── hazelcast/
+│   └── hazelcast.xml          # TCP/IP cluster discovery config
+├── config-server/
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   └── main.py
 ├── facade-service/
 │   ├── Dockerfile
 │   ├── requirements.txt
@@ -144,3 +160,10 @@ micro_services_architevture/
 └── perf/
     └── bench.py
 ```
+
+## Screenshots
+
+![res1](assests/basic_example/image1.png)
+![res2](assests/basic_example/image2.png)
+![res3](assests/basic_example/image3.png)
+![res4](assests/basic_example/image4.png)

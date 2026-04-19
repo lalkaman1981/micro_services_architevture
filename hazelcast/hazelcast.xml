@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<hazelcast xmlns="http://www.hazelcast.com/schema/config"
+           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+           xsi:schemaLocation="http://www.hazelcast.com/schema/config
+           https://hazelcast.com/schema/config/hazelcast-config-5.3.xsd">
+
+    <cluster-name>dev</cluster-name>
+
+    <network>
+        <port auto-increment="false">5701</port>
+        <join>
+            <multicast enabled="false"/>
+            <tcp-ip enabled="true">
+                <member>hazelcast-1:5701</member>
+                <member>hazelcast-2:5701</member>
+                <member>hazelcast-3:5701</member>
+            </tcp-ip>
+        </join>
+    </network>
+
+</hazelcast>

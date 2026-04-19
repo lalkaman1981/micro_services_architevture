@@ -1,30 +1,142 @@
 version: "3.9"
 
 services:
-  logging-service:
-    build: ./logging-service
-    container_name: logging-service
+
+  # ── Config server ──────────────────────────────────────────────────────────
+  config-server:
+    build: ./config-server
+    container_name: config-server
     ports:
-      - "8001:8001"
+      - "8080:8080"
     networks:
       - microservices-net
 
+  # ── Hazelcast cluster (3 nodes) ────────────────────────────────────────────
+  hazelcast-1:
+    image: hazelcast/hazelcast:5.3
+    container_name: hazelcast-1
+    ports:
+      - "5701:5701"
+    environment:
+      - JAVA_OPTS=-Dhazelcast.config=/opt/hazelcast/config_ext/hazelcast.xml
+    volumes:
+      - ./hazelcast:/opt/hazelcast/config_ext
+    networks:
+      - microservices-net
+
+  hazelcast-2:
+    image: hazelcast/hazelcast:5.3
+    container_name: hazelcast-2
+    ports:
+      - "5702:5701"
+    environment:
+      - JAVA_OPTS=-Dhazelcast.config=/opt/hazelcast/config_ext/hazelcast.xml
+    volumes:
+      - ./hazelcast:/opt/hazelcast/config_ext
+    networks:
+      - microservices-net
+
+  hazelcast-3:
+    image: hazelcast/hazelcast:5.3
+    container_name: hazelcast-3
+    ports:
+      - "5703:5701"
+    environment:
+      - JAVA_OPTS=-Dhazelcast.config=/opt/hazelcast/config_ext/hazelcast.xml
+    volumes:
+      - ./hazelcast:/opt/hazelcast/config_ext
+    networks:
+      - microservices-net
+
+  # ── Logging service (3 instances, shared Hazelcast distributed map) ────────
+  logging-service-1:
+    build: ./logging-service
+    container_name: logging-service-1
+    ports:
+      - "8011:8001"
+    environment:
+      - CONFIG_SERVER_URL=http://config-server:8080
+      - SERVICE_URL=http://logging-service-1:8001
+      - HZ_HOSTS=hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701
+    depends_on:
+      - config-server
+      - hazelcast-1
+      - hazelcast-2
+      - hazelcast-3
+    networks:
+      - microservices-net
+
+  logging-service-2:
+    build: ./logging-service
+    container_name: logging-service-2
+    ports:
+      - "8012:8001"
+    environment:
+      - CONFIG_SERVER_URL=http://config-server:8080
+      - SERVICE_URL=http://logging-service-2:8001
+      - HZ_HOSTS=hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701
+    depends_on:
+      - config-server
+      - hazelcast-1
+      - hazelcast-2
+      - hazelcast-3
+    networks:
+      - microservices-net
+
+  logging-service-3:
+    build: ./logging-service
+    container_name: logging-service-3
+    ports:
+      - "8013:8001"
+    environment:
+      - CONFIG_SERVER_URL=http://config-server:8080
+      - SERVICE_URL=http://logging-service-3:8001
+      - HZ_HOSTS=hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701
+    depends_on:
+      - config-server
+      - hazelcast-1
+      - hazelcast-2
+      - hazelcast-3
+    networks:
+      - microservices-net
+
+  # ── Counter service (consumes from Hazelcast queue) ────────────────────────
   counter-service:
     build: ./counter-service
     container_name: counter-service
     ports:
       - "8002:8002"
+    environment:
+      - CONFIG_SERVER_URL=http://config-server:8080
+      - SERVICE_URL=http://counter-service:8002
+      - HZ_HOSTS=hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701
+    depends_on:
+      - config-server
+      - hazelcast-1
+      - hazelcast-2
+      - hazelcast-3
     networks:
       - microservices-net
 
+  # ── Facade service (produces to Hazelcast queue, queries config-server) ────
   facade-service:
     build: ./facade-service
     container_name: facade-service
     ports:
       - "8000:8000"
+    environment:
+      - CONFIG_SERVER_URL=http://config-server:8080
+      - SERVICE_URL=http://facade-service:8000
+      - HZ_HOSTS=hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701
     depends_on:
-      - logging-service
+      - config-server
+      - logging-service-1
+      - logging-service-2
+      - logging-service-3
       - counter-service
+      - hazelcast-1
+      - hazelcast-2
+      - hazelcast-3
     networks:
       - microservices-net
 
