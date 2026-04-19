@@ -64,12 +64,14 @@ Stores transactions in a **Hazelcast distributed map** (`logging-messages`) shar
 | `GET` | `/user/{user_id}` | Transactions for one user |
 
 ### Counter Service (port 8002)
-Runs a background thread that **consumes** from the Hazelcast `counter-transactions` queue and updates in-memory balances.
+Runs a background thread that **consumes** from the Hazelcast `counter-transactions` queue and updates balances in a **SQLite disk database** (`/data/counter.db`, persisted via the `counter-data` Docker volume). Writes are intentionally slowed by `WRITE_DELAY_S` (default `0.5s`) to make the value of MQ-buffered async writes observable — this matches the task's stated motivation: "*counter-service interacts with a disk DB ... such an operation may be slow, so facade-service may not wait for it*".
+
+Idempotency: each `transaction_id` is recorded in `applied_transactions`, so re-delivered or replayed messages won't double-count.
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET` | `/balance/{user_id}` | Balance for one user |
-| `GET` | `/balances` | All account balances |
+| `GET` | `/balance/{user_id}` | Balance for one user (read from SQLite) |
+| `GET` | `/balances` | All account balances (read from SQLite) |
 
 ### Hazelcast Cluster (3 nodes, ports 5701–5703)
 Provides both the **distributed map** (used by logging-service) and the **distributed queue** (used as MQ between facade and counter).
@@ -130,9 +132,11 @@ curl http://localhost:8000/user/alice
 **Unpause — counter-service drains the queue and catches up:**
 ```bash
 docker unpause counter-service
-# After a few seconds:
+# After a few seconds (queue drains at ~1 tx / WRITE_DELAY_S):
 curl http://localhost:8000/user/alice   # balance now reflects all queued transactions
 ```
+
+Because balances live in SQLite on a Docker-managed volume (`counter-data`), they also survive a full container restart, not just `docker pause`.
 
 ## Project Structure
 
@@ -167,3 +171,29 @@ micro_services_architevture/
 ![res2](assests/basic_example/image2.png)
 ![res3](assests/basic_example/image3.png)
 ![res4](assests/basic_example/image4.png)
+
+### Stack startup:
+![res5](assests/mq/image1.png)
+
+### POST 10 transactions:
+![res6](assests/mq/image2.png)
+![res7](assests/mq/image3.png)
+
+### Different logging-service instances receive messages:
+![res8](assests/mq/image4.png)
+
+### Counter-service consumed all messages from the MQ:
+![res9](assests/mq/image5.png)
+
+### GET reads via facade:
+![res10](assests/mq/image6.png)
+
+### Fault tolerance - pause + POST:
+![res11](assests/mq/image7.png)
+![res12](assests/mq/image8.png)
+![res13](assests/mq/image9.png)
+![res14](assests/mq/image10.png)
+
+### Fault tolerance - unpause + drain:
+![res15](assests/mq/image11.png)
+![res16](assests/mq/image12.png)

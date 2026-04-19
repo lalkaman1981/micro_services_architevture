@@ -100,7 +100,7 @@ services:
     networks:
       - microservices-net
 
-  # ── Counter service (consumes from Hazelcast queue) ────────────────────────
+  # ── Counter service (consumes from Hazelcast queue, writes to disk DB) ─────
   counter-service:
     build: ./counter-service
     container_name: counter-service
@@ -110,6 +110,10 @@ services:
       - CONFIG_SERVER_URL=http://config-server:8080
       - SERVICE_URL=http://counter-service:8002
       - HZ_HOSTS=hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701
+      - DB_PATH=/data/counter.db
+      - WRITE_DELAY_S=0.5
+    volumes:
+      - counter-data:/data
     depends_on:
       - config-server
       - hazelcast-1
@@ -143,3 +147,6 @@ services:
 networks:
   microservices-net:
     driver: bridge
+
+volumes:
+  counter-data:

@@ -130,22 +130,33 @@ async def post_transaction(tx: TransactionIn):
 async def get_user(user_id: str):
     global _logging_total, _counter_total, _logging_calls, _counter_calls
 
-    counter_url = await get_random_url("counter-service")
-    logging_url = await get_random_url("logging-service")
+    balance = None
+    transactions: list = []
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        t_cnt = time.perf_counter()
-        cnt_r = await client.get(f"{counter_url}/balance/{user_id}")
-        _counter_total += time.perf_counter() - t_cnt
-        _counter_calls += 1
+    # Counter-service may be down (queue keeps absorbing writes meanwhile) — return null balance per task spec.
+    try:
+        counter_url = await get_random_url("counter-service")
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            t_cnt = time.perf_counter()
+            cnt_r = await client.get(f"{counter_url}/balance/{user_id}")
+            _counter_total += time.perf_counter() - t_cnt
+            _counter_calls += 1
+        if cnt_r.status_code == 200:
+            balance = cnt_r.json().get("balance")
+    except Exception as e:
+        print(f"[facade] WARN counter-service unreachable for /user/{user_id}: {e}")
 
-        t_log = time.perf_counter()
-        log_r = await client.get(f"{logging_url}/user/{user_id}")
-        _logging_total += time.perf_counter() - t_log
-        _logging_calls += 1
-
-    balance = cnt_r.json().get("balance") if cnt_r.status_code == 200 else None
-    transactions = log_r.json() if log_r.status_code == 200 else []
+    try:
+        logging_url = await get_random_url("logging-service")
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            t_log = time.perf_counter()
+            log_r = await client.get(f"{logging_url}/user/{user_id}")
+            _logging_total += time.perf_counter() - t_log
+            _logging_calls += 1
+        if log_r.status_code == 200:
+            transactions = log_r.json()
+    except Exception as e:
+        print(f"[facade] WARN logging-service unreachable for /user/{user_id}: {e}")
 
     return {"balance": balance, "transactions": transactions}
 
@@ -154,14 +165,19 @@ async def get_user(user_id: str):
 async def get_accounts():
     global _counter_total, _counter_calls
 
-    counter_url = await get_random_url("counter-service")
+    try:
+        counter_url = await get_random_url("counter-service")
+    except HTTPException:
+        return None
+
     t = time.perf_counter()
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        try:
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
             r = await client.get(f"{counter_url}/balances")
             r.raise_for_status()
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:
+        print(f"[facade] WARN counter-service unreachable for /accounts: {e}")
+        return None
     _counter_total += time.perf_counter() - t
     _counter_calls += 1
 
