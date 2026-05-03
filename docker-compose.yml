@@ -2,14 +2,43 @@ version: "3.9"
 
 services:
 
-  # ── Config server ──────────────────────────────────────────────────────────
-  config-server:
-    build: ./config-server
-    container_name: config-server
+  # ── Consul (Service Discovery + Config KV) ─────────────────────────────────
+  consul:
+    image: hashicorp/consul:1.17
+    container_name: consul
+    command: consul agent -dev -bind=0.0.0.0 -client=0.0.0.0 -ui
     ports:
-      - "8080:8080"
+      - "8500:8500"
+      - "8600:8600/udp"
+    healthcheck:
+      test: ["CMD", "consul", "members"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - microservices-net
+
+  # ── Consul KV seeder ────────────────────────────────────────────────────────
+  consul-init:
+    image: hashicorp/consul:1.17
+    container_name: consul-init
+    depends_on:
+      consul:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        export CONSUL_HTTP_ADDR=http://consul:8500
+        consul kv put config/hazelcast/hosts "hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701"
+        consul kv put config/hazelcast/cluster_name "dev"
+        consul kv put config/hazelcast/map_name "logging-messages"
+        consul kv put config/mq/hosts "hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701"
+        consul kv put config/mq/cluster_name "dev"
+        consul kv put config/mq/queue_name "counter-transactions"
+        echo "[consul-init] KV store seeded successfully"
+    networks:
+      - microservices-net
+    restart: "no"
 
   # ── Hazelcast cluster (3 nodes) ────────────────────────────────────────────
   hazelcast-1:
@@ -48,95 +77,129 @@ services:
     networks:
       - microservices-net
 
-  # ── Logging service (3 instances, shared Hazelcast distributed map) ────────
+  # ── Logging service (3 instances) ─────────────────────────────────────────
   logging-service-1:
     build: ./logging-service
     container_name: logging-service-1
+    hostname: logging-service-1
     ports:
       - "8011:8001"
     environment:
-      - CONFIG_SERVER_URL=http://config-server:8080
+      - CONSUL_HOST=consul
       - SERVICE_URL=http://logging-service-1:8001
-      - HZ_HOSTS=hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701
     depends_on:
-      - config-server
-      - hazelcast-1
-      - hazelcast-2
-      - hazelcast-3
+      consul:
+        condition: service_healthy
+      consul-init:
+        condition: service_completed_successfully
+      hazelcast-1:
+        condition: service_started
+      hazelcast-2:
+        condition: service_started
+      hazelcast-3:
+        condition: service_started
     networks:
       - microservices-net
 
   logging-service-2:
     build: ./logging-service
     container_name: logging-service-2
+    hostname: logging-service-2
     ports:
       - "8012:8001"
     environment:
-      - CONFIG_SERVER_URL=http://config-server:8080
+      - CONSUL_HOST=consul
       - SERVICE_URL=http://logging-service-2:8001
-      - HZ_HOSTS=hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701
     depends_on:
-      - config-server
-      - hazelcast-1
-      - hazelcast-2
-      - hazelcast-3
+      consul:
+        condition: service_healthy
+      consul-init:
+        condition: service_completed_successfully
+      hazelcast-1:
+        condition: service_started
+      hazelcast-2:
+        condition: service_started
+      hazelcast-3:
+        condition: service_started
     networks:
       - microservices-net
 
   logging-service-3:
     build: ./logging-service
     container_name: logging-service-3
+    hostname: logging-service-3
     ports:
       - "8013:8001"
     environment:
-      - CONFIG_SERVER_URL=http://config-server:8080
+      - CONSUL_HOST=consul
       - SERVICE_URL=http://logging-service-3:8001
-      - HZ_HOSTS=hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701
     depends_on:
-      - config-server
-      - hazelcast-1
-      - hazelcast-2
-      - hazelcast-3
+      consul:
+        condition: service_healthy
+      consul-init:
+        condition: service_completed_successfully
+      hazelcast-1:
+        condition: service_started
+      hazelcast-2:
+        condition: service_started
+      hazelcast-3:
+        condition: service_started
     networks:
       - microservices-net
 
-  # ── Counter service (consumes from Hazelcast queue) ────────────────────────
+  # ── Counter service ────────────────────────────────────────────────────────
   counter-service:
     build: ./counter-service
     container_name: counter-service
+    hostname: counter-service
     ports:
       - "8002:8002"
     environment:
-      - CONFIG_SERVER_URL=http://config-server:8080
+      - CONSUL_HOST=consul
       - SERVICE_URL=http://counter-service:8002
-      - HZ_HOSTS=hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701
     depends_on:
-      - config-server
-      - hazelcast-1
-      - hazelcast-2
-      - hazelcast-3
+      consul:
+        condition: service_healthy
+      consul-init:
+        condition: service_completed_successfully
+      hazelcast-1:
+        condition: service_started
+      hazelcast-2:
+        condition: service_started
+      hazelcast-3:
+        condition: service_started
     networks:
       - microservices-net
 
-  # ── Facade service (produces to Hazelcast queue, queries config-server) ────
+  # ── Facade service ─────────────────────────────────────────────────────────
   facade-service:
     build: ./facade-service
     container_name: facade-service
+    hostname: facade-service
     ports:
       - "8000:8000"
     environment:
-      - CONFIG_SERVER_URL=http://config-server:8080
+      - CONSUL_HOST=consul
       - SERVICE_URL=http://facade-service:8000
-      - HZ_HOSTS=hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701
     depends_on:
-      - config-server
-      - logging-service-1
-      - logging-service-2
-      - logging-service-3
-      - counter-service
-      - hazelcast-1
-      - hazelcast-2
-      - hazelcast-3
+      consul:
+        condition: service_healthy
+      consul-init:
+        condition: service_completed_successfully
+      logging-service-1:
+        condition: service_started
+      logging-service-2:
+        condition: service_started
+      logging-service-3:
+        condition: service_started
+      counter-service:
+        condition: service_started
+      hazelcast-1:
+        condition: service_started
+      hazelcast-2:
+        condition: service_started
+      hazelcast-3:
+        condition: service_started
     networks:
       - microservices-net
 
