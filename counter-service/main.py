@@ -6,10 +6,11 @@ import time
 import urllib.parse
 import consul
 import hazelcast
+import psycopg2
+from psycopg2 import pool as pg_pool
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import Dict
 from contextlib import asynccontextmanager
 from datetime import datetime
 
@@ -24,7 +25,7 @@ SERVICE_ID = f"counter-service-{SERVICE_HOST}"
 consul_client = consul.Consul(host=CONSUL_HOST, port=8500)
 
 hz_client = None
-balances: Dict[str, float] = {}
+db_pool: pg_pool.ThreadedConnectionPool = None
 
 
 class Transaction(BaseModel):
@@ -40,6 +41,83 @@ def _kv_get(key: str) -> str:
     return data["Value"].decode()
 
 
+def _init_db_schema(conn):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS balances (
+                user_id   TEXT PRIMARY KEY,
+                balance   NUMERIC NOT NULL DEFAULT 0
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS processed_transactions (
+                transaction_id TEXT PRIMARY KEY,
+                user_id        TEXT NOT NULL,
+                amount         NUMERIC NOT NULL,
+                processed_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+    conn.commit()
+
+
+def _apply_transaction(msg: dict) -> float:
+    """Apply a transaction to the DB atomically; return new balance."""
+    conn = db_pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO processed_transactions (transaction_id, user_id, amount) "
+                "VALUES (%s, %s, %s) ON CONFLICT (transaction_id) DO NOTHING",
+                (msg["transaction_id"], msg["user_id"], msg["amount"]),
+            )
+            if cur.rowcount == 0:
+                cur.execute("SELECT balance FROM balances WHERE user_id = %s", (msg["user_id"],))
+                row = cur.fetchone()
+                conn.commit()
+                return float(row[0]) if row else 0.0
+
+            cur.execute(
+                "INSERT INTO balances (user_id, balance) VALUES (%s, %s) "
+                "ON CONFLICT (user_id) DO UPDATE SET balance = balances.balance + EXCLUDED.balance "
+                "RETURNING balance",
+                (msg["user_id"], msg["amount"]),
+            )
+            new_balance = float(cur.fetchone()[0])
+        conn.commit()
+        return new_balance
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        db_pool.putconn(conn)
+
+
+def _get_balance(user_id: str):
+    conn = db_pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT balance FROM balances WHERE user_id = %s", (user_id,))
+            row = cur.fetchone()
+        return float(row[0]) if row else None
+    finally:
+        db_pool.putconn(conn)
+
+
+def _get_all_balances() -> dict:
+    conn = db_pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT user_id, balance FROM balances")
+            rows = cur.fetchall()
+        return {uid: float(bal) for uid, bal in rows}
+    finally:
+        db_pool.putconn(conn)
+
+
 def consume_queue(client: hazelcast.HazelcastClient, queue_name: str):
     queue = client.get_queue(queue_name).blocking()
     print("[counter] Queue consumer started")
@@ -47,9 +125,7 @@ def consume_queue(client: hazelcast.HazelcastClient, queue_name: str):
         try:
             item = queue.take()
             msg = json.loads(item)
-            prev = balances.get(msg["user_id"], 0.0)
-            balances[msg["user_id"]] = prev + msg["amount"]
-            new_bal = balances[msg["user_id"]]
+            new_bal = _apply_transaction(msg)
             print(
                 f"[counter] {datetime.now().isoformat()} MQ "
                 f"transaction_id={msg['transaction_id']} "
@@ -60,21 +136,59 @@ def consume_queue(client: hazelcast.HazelcastClient, queue_name: str):
             time.sleep(1)
 
 
+def _connect_db(host: str, port: int, user: str, password: str, dbname: str):
+    last_err = None
+    for attempt in range(30):
+        try:
+            p = pg_pool.ThreadedConnectionPool(
+                minconn=1,
+                maxconn=10,
+                host=host,
+                port=port,
+                user=user,
+                password=password,
+                dbname=dbname,
+            )
+            test = p.getconn()
+            _init_db_schema(test)
+            p.putconn(test)
+            print(f"[counter] Connected to Postgres at {host}:{port}/{dbname}")
+            return p
+        except Exception as e:
+            last_err = e
+            print(f"[counter] Postgres connect attempt {attempt + 1} failed: {e}")
+            time.sleep(2)
+    raise RuntimeError(f"Could not connect to Postgres: {last_err}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global hz_client
+    global hz_client, db_pool
 
     mq_hosts = mq_cluster = mq_queue = None
+    db_host = db_port = db_user = db_pass = db_name = None
     for attempt in range(15):
         try:
             mq_hosts = _kv_get("config/mq/hosts").split(",")
             mq_cluster = _kv_get("config/mq/cluster_name")
             mq_queue = _kv_get("config/mq/queue_name")
-            print(f"[counter] MQ config from Consul KV: hosts={mq_hosts} cluster={mq_cluster} queue={mq_queue}")
+            db_host = _kv_get("config/db/host")
+            db_port = int(_kv_get("config/db/port"))
+            db_user = _kv_get("config/db/user")
+            db_pass = _kv_get("config/db/password")
+            db_name = _kv_get("config/db/name")
+            print(
+                f"[counter] MQ config from Consul KV: hosts={mq_hosts} cluster={mq_cluster} queue={mq_queue}"
+            )
+            print(f"[counter] DB config from Consul KV: {db_user}@{db_host}:{db_port}/{db_name}")
             break
         except Exception as e:
             print(f"[counter] Consul KV attempt {attempt + 1} failed: {e}")
             await asyncio.sleep(3)
+
+    db_pool = await asyncio.to_thread(
+        _connect_db, db_host, db_port, db_user, db_pass, db_name
+    )
 
     for attempt in range(10):
         try:
@@ -121,6 +235,8 @@ async def lifespan(app: FastAPI):
         pass
     if hz_client:
         hz_client.shutdown()
+    if db_pool:
+        db_pool.closeall()
 
 
 app = FastAPI(title="counter-service", lifespan=lifespan)
@@ -133,15 +249,16 @@ async def health():
 
 @app.get("/balance/{user_id}")
 async def get_balance(user_id: str):
-    if user_id not in balances:
+    bal = await asyncio.to_thread(_get_balance, user_id)
+    if bal is None:
         raise HTTPException(status_code=404, detail=f"User '{user_id}' not found")
-    bal = balances[user_id]
     print(f"[counter] GET /balance/{user_id} -> {bal:.2f}")
     return {"user_id": user_id, "balance": bal}
 
 
 @app.get("/balances")
 async def get_all_balances():
+    balances = await asyncio.to_thread(_get_all_balances)
     print(f"[counter] GET /balances -> {len(balances)} accounts")
     return balances
 

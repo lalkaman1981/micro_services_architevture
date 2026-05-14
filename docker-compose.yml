@@ -35,10 +35,36 @@ services:
         consul kv put config/mq/hosts "hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701"
         consul kv put config/mq/cluster_name "dev"
         consul kv put config/mq/queue_name "counter-transactions"
+        consul kv put config/db/host "postgres"
+        consul kv put config/db/port "5432"
+        consul kv put config/db/user "counter"
+        consul kv put config/db/password "counter_pwd"
+        consul kv put config/db/name "counterdb"
         echo "[consul-init] KV store seeded successfully"
     networks:
       - microservices-net
     restart: "no"
+
+  # ── PostgreSQL (counter-service balances) ──────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    hostname: postgres
+    environment:
+      - POSTGRES_USER=counter
+      - POSTGRES_PASSWORD=counter_pwd
+      - POSTGRES_DB=counterdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U counter -d counterdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - microservices-net
 
   # ── Hazelcast cluster (3 nodes) ────────────────────────────────────────────
   hazelcast-1:
@@ -162,6 +188,8 @@ services:
         condition: service_healthy
       consul-init:
         condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
       hazelcast-1:
         condition: service_started
       hazelcast-2:
@@ -206,3 +234,6 @@ services:
 networks:
   microservices-net:
     driver: bridge
+
+volumes:
+  pgdata:
