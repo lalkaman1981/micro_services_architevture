@@ -1,29 +1,145 @@
 version: "3.9"
 
 services:
-  logging-service:
-    build: ./logging-service
-    container_name: logging-service
+  # ---------- Hazelcast cluster (3 nodes) ----------
+  hazelcast-1:
+    image: hazelcast/hazelcast:5.5.0
+    container_name: hazelcast-1
+    environment:
+      JAVA_OPTS: "-Dhazelcast.config=/opt/hazelcast/config_ext/hazelcast.yaml"
+    volumes:
+      - ./hazelcast/hazelcast.yaml:/opt/hazelcast/config_ext/hazelcast.yaml:ro
     ports:
-      - "8001:8001"
+      - "5701:5701"
     networks:
       - microservices-net
 
+  hazelcast-2:
+    image: hazelcast/hazelcast:5.5.0
+    container_name: hazelcast-2
+    environment:
+      JAVA_OPTS: "-Dhazelcast.config=/opt/hazelcast/config_ext/hazelcast.yaml"
+    volumes:
+      - ./hazelcast/hazelcast.yaml:/opt/hazelcast/config_ext/hazelcast.yaml:ro
+    ports:
+      - "5702:5701"
+    networks:
+      - microservices-net
+
+  hazelcast-3:
+    image: hazelcast/hazelcast:5.5.0
+    container_name: hazelcast-3
+    environment:
+      JAVA_OPTS: "-Dhazelcast.config=/opt/hazelcast/config_ext/hazelcast.yaml"
+    volumes:
+      - ./hazelcast/hazelcast.yaml:/opt/hazelcast/config_ext/hazelcast.yaml:ro
+    ports:
+      - "5703:5701"
+    networks:
+      - microservices-net
+
+  # ---------- PostgreSQL for counter-service ----------
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_DB: counter
+      POSTGRES_USER: counter
+      POSTGRES_PASSWORD: counter
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U counter -d counter"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    networks:
+      - microservices-net
+
+  # ---------- logging-service (3 instances) ----------
+  logging-service-1:
+    build: ./logging-service
+    container_name: logging-service-1
+    environment:
+      INSTANCE_NAME: logging-service-1
+      HZ_CLUSTER_NAME: dev-cluster
+      HZ_PRIMARY_MEMBER: hazelcast-1:5701
+      HZ_MEMBERS: hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701
+      HZ_MAP_NAME: messages
+    ports:
+      - "8011:8001"
+    depends_on:
+      - hazelcast-1
+      - hazelcast-2
+      - hazelcast-3
+    networks:
+      - microservices-net
+
+  logging-service-2:
+    build: ./logging-service
+    container_name: logging-service-2
+    environment:
+      INSTANCE_NAME: logging-service-2
+      HZ_CLUSTER_NAME: dev-cluster
+      HZ_PRIMARY_MEMBER: hazelcast-2:5701
+      HZ_MEMBERS: hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701
+      HZ_MAP_NAME: messages
+    ports:
+      - "8012:8001"
+    depends_on:
+      - hazelcast-1
+      - hazelcast-2
+      - hazelcast-3
+    networks:
+      - microservices-net
+
+  logging-service-3:
+    build: ./logging-service
+    container_name: logging-service-3
+    environment:
+      INSTANCE_NAME: logging-service-3
+      HZ_CLUSTER_NAME: dev-cluster
+      HZ_PRIMARY_MEMBER: hazelcast-3:5701
+      HZ_MEMBERS: hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701
+      HZ_MAP_NAME: messages
+    ports:
+      - "8013:8001"
+    depends_on:
+      - hazelcast-1
+      - hazelcast-2
+      - hazelcast-3
+    networks:
+      - microservices-net
+
+  # ---------- counter-service ----------
   counter-service:
     build: ./counter-service
     container_name: counter-service
+    environment:
+      DATABASE_URL: postgresql://counter:counter@postgres:5432/counter
     ports:
       - "8002:8002"
+    depends_on:
+      postgres:
+        condition: service_healthy
     networks:
       - microservices-net
 
+  # ---------- facade-service ----------
   facade-service:
     build: ./facade-service
     container_name: facade-service
+    environment:
+      LOGGING_URLS: "http://logging-service-1:8001,http://logging-service-2:8001,http://logging-service-3:8001"
+      COUNTER_URL: "http://counter-service:8002"
     ports:
       - "8000:8000"
     depends_on:
-      - logging-service
+      - logging-service-1
+      - logging-service-2
+      - logging-service-3
       - counter-service
     networks:
       - microservices-net
@@ -31,3 +147,6 @@ services:
 networks:
   microservices-net:
     driver: bridge
+
+volumes:
+  postgres-data:

@@ -1,0 +1,22 @@
+hazelcast:
+  cluster-name: dev-cluster
+  network:
+    port:
+      auto-increment: false
+      port: 5701
+    join:
+      auto-detection:
+        enabled: false
+      multicast:
+        enabled: false
+      tcp-ip:
+        enabled: true
+        member-list:
+          - hazelcast-1
+          - hazelcast-2
+          - hazelcast-3
+  map:
+    messages:
+      backup-count: 1
+      async-backup-count: 0
+      read-backup-data: true
